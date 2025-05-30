@@ -1,106 +1,110 @@
 # Camel Quarkus File to Kafka Pipeline
 
-This project demonstrates a simple data pipeline using Apache Camel on Quarkus. It tails a log file, processes each line, and sends it as a message to a Kafka topic. The entire setup is containerized using Docker Compose.
+This project demonstrates a data pipeline using Apache Camel on Quarkus. It polls a log file, processes each new line, and sends it as a message to a Kafka topic. The setup is containerized using Docker Compose and uses local file system mounts for log data and checkpointing.
+
+## Features
+
+* **Local File System Integration**: Log files and checkpoint data are stored on your local file system, making them easily accessible.
+* **Checkpointing**: The Camel application remembers which log lines have already been processed. If restarted, it will only send new, unprocessed lines to Kafka, preventing duplicates. This is achieved using Camel's idempotent consumer pattern with a file-based repository storing hashes of processed lines.
 
 ## Components
 
 1.  **File Logger (`file-logger`)**:
-    * A simple shell script that continuously writes timestamped random log messages to `/data/logs/app.log`.
-    * This log file is shared with the Camel Quarkus app via a Docker volume.
+    * A shell script that continuously writes timestamped random log messages to a file.
+    * This log file is stored in `./pipeline_data/logs/app.log` on your host and mounted into the container.
 
 2.  **Zookeeper (`zookeeper`)**:
-    * Required by Kafka for cluster management.
+    * Required by Kafka.
 
 3.  **Kafka Broker (`kafka`)**:
-    * The message broker that receives log messages from the Camel application.
-    * Messages are sent to the `log-topic` topic.
+    * Receives log messages. Messages are sent to the `log-topic`.
+    * Kafka data is persisted in `./pipeline_data/kafka_data` on your host.
 
 4.  **Provectus Kafka UI (`kafka-ui`)**:
-    * A web-based UI to view Kafka topics, messages, consumer groups, etc.
-    * Accessible at `http://localhost:8088`.
+    * Web UI for Kafka. Accessible at `http://localhost:8088`.
 
 5.  **Camel Quarkus App (`camel-quarkus-app`)**:
-    * A Quarkus application with an Apache Camel route.
-    * It uses the `camel-stream` component to tail `/data/logs/app.log`.
-    * Each log line is converted to a String and sent to the `log-topic` on the Kafka broker.
-    * Built as a native executable for a small footprint and fast startup.
+    * Polls the log file (e.g., `/data/logs/app.log` inside the container, mapped from `./pipeline_data/logs/app.log` on host).
+    * Splits the file into lines.
+    * Uses an idempotent consumer with a `FileIdempotentRepository` (data stored in `./pipeline_data/checkpoint/processedLineHashes.dat` on host) to process each line only once.
+    * Sends new lines to the `log-topic` on Kafka.
+    * Built as a native executable.
 
 ## Project Structure
 
 ```
 .
 ├── camel-quarkus-app
-│   ├── Dockerfile               # For building the native Quarkus app
-│   ├── pom.xml                  # Maven project configuration
+│   ├── Dockerfile
+│   ├── pom.xml
 │   └── src
 │       ├── main
-│       │   ├── java
-│       │   │   └── org
-│       │   │       └── acme
-│       │   │           └── FileToKafkaRoute.java  # Camel route definition
-│       │   └── resources
-│       │       └── application.properties       # Quarkus configuration
-├── docker-compose.yml           # Docker Compose file to orchestrate services
+│       │   ├── java/org/acme/FileToKafkaRoute.java  # Camel route with checkpointing
+│       │   └── resources/application.properties
+├── docker-compose.yml           # Defines services, uses local mounts
 ├── file-logger
-│   ├── Dockerfile               # For building the file-logger service
-│   └── logger.sh                # Script to generate log messages
-└── README.md                    # This file
+│   ├── Dockerfile
+│   └── logger.sh
+├── pipeline_data                # YOU NEED TO CREATE THIS DIRECTORY
+│   ├── checkpoint               # For checkpoint data (will be created by app if parent exists)
+│   ├── kafka_data               # For Kafka's persistent data
+│   └── logs                     # For the generated log file
+└── README.md
 ```
-
 
 ## Prerequisites
 
 * Docker
 * Docker Compose
-* Maven (if you want to build the Quarkus app outside of Docker, though the provided `Dockerfile` handles this)
-* Java JDK (corresponding to the one used in `pom.xml`, e.g., JDK 17+)
+* Maven (for Quarkus app if building outside Docker)
+* Java JDK (e.g., JDK 17+)
 
 ## How to Run
 
-1.  **Clone the repository (or create the files as provided).**
+1.  **Create Local Directories:**
+    Before the first run, you **MUST** create the `pipeline_data` directory and its subdirectories in the root of your project:
+    ```bash
+    mkdir -p pipeline_data/logs
+    mkdir -p pipeline_data/checkpoint
+    mkdir -p pipeline_data/kafka_data
+    ```
+    The `file-logger` will write to `pipeline_data/logs/app.log`. The Camel app will read from there and store checkpoint data in `pipeline_data/checkpoint`. Kafka will store its data in `pipeline_data/kafka_data`.
 
 2.  **Build and Start Services:**
-    Open a terminal in the root directory of the project and run:
+    Open a terminal in the project root and run:
     ```bash
     docker-compose up --build
     ```
-    This command will:
-    * Build the `file-logger` image.
-    * Build the `camel-quarkus-app` native executable image (this might take a few minutes the first time).
-    * Start all defined services.
 
 3.  **Verify Operation:**
-    * **File Logger**: You should see logs from the `file-logger` service in the `docker-compose` output, indicating it's writing to the log file.
-    * **Camel Quarkus App**: Logs from this service will show it connecting to Kafka and processing lines from the file. Example: `INFO  [org.acm.FilToKafRou] (Camel (camel-1) thread #2 - stream://file) Read from file: [timestamp] Random log message XYZ`
+    * **File Logger**: Check `pipeline_data/logs/app.log` on your host. It should be populated with logs.
+    * **Camel Quarkus App**:
+        * Observe its logs via `docker-compose logs -f camel-quarkus-app`.
+        * You should see messages about processing new lines and sending them to Kafka.
+        * Check `pipeline_data/checkpoint/processedLineHashes.dat` on your host. This file will store hashes of processed lines.
     * **Kafka UI**:
-        * Open your web browser and navigate to `http://localhost:8088`.
-        * You should see the `local-kafka` cluster.
-        * Navigate to the `Topics` section. You should find `log-topic`.
-        * Click on `log-topic` and go to the `Messages` tab to see the log entries being streamed from the file.
+        * Open `http://localhost:8088`.
+        * Find `log-topic` under Topics and view its messages.
 
-4.  **Inspect Shared Log File (Optional):**
-    The log file is stored in a Docker volume named `shared_logs_volume`. You can inspect the volume or, if you modify `docker-compose.yml` to map it to a host directory, you can view it directly on your host.
-
-    To see where Docker stores the volume (example command, might vary by OS/Docker version):
-    ```bash
-    docker volume inspect shared_logs_volume
-    ```
+4.  **Test Checkpointing:**
+    * Let the system run for a bit to send some messages.
+    * Stop the services: `Ctrl+C` in the `docker-compose` terminal, then `docker-compose down`.
+    * Do **not** delete the `pipeline_data/checkpoint` or `pipeline_data/logs` directories.
+    * Restart the services: `docker-compose up --build` (or just `docker-compose up` if no code changes).
+    * The `file-logger` will continue adding to `app.log`.
+    * The `camel-quarkus-app` will re-read `app.log` but should only send lines to Kafka that were added *after* the previous shutdown (i.e., lines whose hashes are not in `processedLineHashes.dat`). You should not see old messages being re-sent to Kafka.
 
 5.  **Stop Services:**
-    Press `Ctrl+C` in the terminal where `docker-compose up` is running. To remove the containers, networks, and volumes (optional, be careful with volumes if you want to persist data):
+    `Ctrl+C`, then `docker-compose down`. To also remove Kafka's data (if you want a clean slate for Kafka itself, but keep logs and checkpoint data for testing):
     ```bash
-    docker-compose down -v
+    docker-compose down
+    # Optionally, to clear Kafka's own data:
+    # rm -rf ./pipeline_data/kafka_data/*
     ```
 
-## Configuration Details
+## Configuration
 
-* **Kafka Broker**: `kafka:9092` (internal Docker network address)
-* **Kafka Topic**: `log-topic` (auto-created if it doesn't exist)
-* **Log File Path (inside containers)**: `/data/logs/app.log`
-* **Shared Volume**: `shared_logs_volume` is used to share the log file between `file-logger` and `camel-quarkus-app`.
-
-## Customization
-
-* **Log Format/Frequency**: Modify `file-logger/logger.sh`.
-* **Camel Route Logic**: Edit `camel-quarkus-app/src/main/java/org/acme/FileToKafkaRoute.java`. For example, you could add transformations (JSON, XML), filtering, etc.
-* **Kafka Configuration**: Adjust settings in `docker-compose.yml` for the Kafka service or in `application.properties` for t
+* **Log File (Host)**: `./pipeline_data/logs/app.log`
+* **Checkpoint Data (Host)**: `./pipeline_data/checkpoint/processedLineHashes.dat`
+* **Kafka Data (Host)**: `./pipeline_data/kafka_data/`
+* **Kafka Topic**: `log-topic`

@@ -1,2 +1,1 @@
-pipeline_data/checkpoint
-pipeline_data/kafka_data
+pipeline_data/*
