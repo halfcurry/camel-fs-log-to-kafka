@@ -1,47 +1,63 @@
-## Stage 1: Build the native executable
-# Use a Maven image that includes GraalVM for native compilation
-# Ensure the GraalVM version is compatible with your Quarkus version.
-# For Quarkus 3.x, Java 17+ is typical.
-# Check https://quarkus.io/guides/building-native-image#configuring-graalvm for recommended images.
-# Example: quay.io/quarkus/ubi-quarkus-native-image:23.0-java17 for Quarkus 3.2+
-# Or use a generic Maven image with a JDK and let Quarkus download GraalVM.
-ARG QUARKUS_NATIVE_BUILDER_IMAGE=quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-17
-FROM ${QUARKUS_NATIVE_BUILDER_IMAGE} AS build
+# Stage 1: Build - Use the dedicated Quarkus Mandrel builder image for Java 21
+FROM quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-21 AS build
 
-# Set the working directory
-WORKDIR /usr/src/app
+# Switch to the root user for installations
+USER root
 
-# Copy Maven project files
-COPY pom.xml .
-COPY src ./src
+# Install necessary tools for downloading and extracting Maven
+RUN microdnf update -y && microdnf install -y curl tar findutils gzip
+
+# Define Maven version and download URL
+ARG MAVEN_VERSION=3.9.6
+ARG MAVEN_URL=https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz
+
+# Download, extract, and configure Maven
+RUN curl -fSL "${MAVEN_URL}" -o /tmp/apache-maven.tar.gz \
+    && tar -xzf /tmp/apache-maven.tar.gz -C /opt/ \
+    && rm /tmp/apache-maven.tar.gz \
+    && ln -s /opt/apache-maven-${MAVEN_VERSION} /opt/maven
+
+# Set Maven environment variables
+ENV M2_HOME=/opt/maven
+ENV PATH="${M2_HOME}/bin:${PATH}"
+
+# Set the working directory inside the container
+WORKDIR /code
+
+# Copy your project's source code into the /code directory
+COPY . /code/
+
+# Copy the custom settings.xml into Maven's conf directory
+COPY settings.xml ${M2_HOME}/conf/settings.xml
+
+# Clean the Maven local repository to prevent corrupted dependencies.
+# This ensures a fresh download of all plugins and dependencies.
+RUN rm -rf /root/.m2/repository || true && mkdir -p /root/.m2/repository
 
 # Build the native executable
-# Ensure MAVEN_OPTS is set if your build needs more memory
-# RUN mvn -B package -Dnative -Dquarkus.native.container-build=true -DskipTests
-# Adding -Dquarkus.native.builder-image to ensure it uses the one specified or a compatible one
-# The -B flag is for batch mode (non-interactive)
-RUN mvn -B package -Pnative -Dquarkus.native.container-build=true -DskipTests
+# -Pnative: Activates the native profile for native image compilation.
+# -Dquarkus.package.type=native: Explicitly tells Quarkus to build a native executable.
+# -DskipTests: Skips running tests during the build.
+# -s ${M2_HOME}/conf/settings.xml: Explicitly tells Maven to use our custom settings.xml
+RUN mvn package -Pnative -Dquarkus.package.type=native -DskipTests -s ${M2_HOME}/conf/settings.xml
 
-## Stage 2: Create the lightweight runtime image
-# Use a minimal base image. Quarkus provides ubi-quarkus-micro-image or similar.
-# For Quarkus 3.x, quarkus-micro-image is based on ubi9-micro.
-FROM quay.io/quarkus/quarkus-micro-image:1.0
-# FROM registry.access.redhat.com/ubi8/ubi-minimal AS runtime
-# FROM alpine:latest AS runtime # If you prefer alpine, ensure all native libs are there
+# Stage 2: Runtime - Use a minimal Quarkus micro-image for the final application
+FROM quay.io/quarkus/quarkus-micro-image:3.0
 
+# Set the working directory inside the container to /work.
 WORKDIR /work/
 
-# Copy the native executable from the build stage
-# The executable is typically in target/*-runner
-COPY --from=build /usr/src/app/target/*-runner /work/application
+# Copy the native executable from the build stage to the runtime stage.
+COPY --from=build /code/target/*-runner /work/application
 
-# Set permissions for the executable and expose port
-RUN chmod 775 /work/application && chown 1001 /work/application
+# Make the application executable.
+RUN chmod 775 /work/application
+
+# Expose port 8080, which is the default HTTP port for Quarkus applications.
 EXPOSE 8080
+
+# Switch to a non-root user (user ID 1001) for security best practices.
 USER 1001
 
-# Set the entrypoint to run the native executable
-# The JAVA_OPTS_APPEND can be used to pass additional Java options if needed
-# For native, these are usually baked in or passed differently.
-# For this app, environment variables are used for configuration.
-CMD ["./application", "-Dquarkus.http.host=0.0.0.0"]
+# Define the command to run when the container starts.
+ENTRYPOINT ["./application", "-Dquarkus.http.host=0.0.0.0"]
