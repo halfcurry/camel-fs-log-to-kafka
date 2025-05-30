@@ -75,7 +75,7 @@ services:
       - file-logger
     volumes:
       # Mount local directory for logs (read-only for this app)
-      - ./pipeline_data/logs:/data/logs:ro
+      - ./pipeline_data/logs:/data/logs
       # Mount local directory for checkpoint data (read-write)
       # Ensure './pipeline_data/checkpoint' exists on your host.
       - ./pipeline_data/checkpoint:/data/checkpoint

@@ -86,8 +86,9 @@ public class FileToKafkaRoute extends RouteBuilder {
         // The file component will re-read the entire file on each poll if it changed.
         // The idempotent consumer will then filter out already processed lines.
         // initialDelay=1000, delay=2000: poll every 2 seconds after an initial 1-second delay.
+        // Reverted to readLock=changed and added readLockCheckInterval for more frequent checks.
         String fileEndpointUri = String.format(
-            "file:%s?noop=true&initialDelay=1000&delay=2000&fileName=%s&charset=UTF-8",
+            "file:%s?noop=true&initialDelay=1000&delay=2000&fileName=%s&charset=UTF-8&readLock=changed&readLockCheckInterval=500",
             new File(logFilePath).getParent(), // Directory
             new File(logFilePath).getName()     // File name
         );
@@ -102,6 +103,7 @@ public class FileToKafkaRoute extends RouteBuilder {
 
         from(fileEndpointUri)
             .routeId("file-to-kafka-route")
+            .log(LoggingLevel.INFO, "File polled, processing content. File size: ${header.CamelFileLength} bytes")
             .split(body().tokenize("\n")).streaming() // Process lines one by one, streaming helps with large files
                 .transform(body().regexReplaceAll("[\r\n]+", "")) // Clean up any trailing newlines/CR
                 .filter(body().isNotEqualTo("")) // Skip empty lines that might result from splitting
@@ -109,14 +111,17 @@ public class FileToKafkaRoute extends RouteBuilder {
                     String line = exchange.getIn().getBody(String.class);
                     String lineHash = calculateSHA256(line);
                     exchange.getIn().setHeader("lineHash", lineHash);
-                    // LOG.trace("Hashed line for idempotency: {} -> {}", line, lineHash); // Very verbose
+                    LOG.debug("Hashed line for idempotency: {} -> {}", line, lineHash);
                 })
+                .log(LoggingLevel.DEBUG, "Checking idempotency for line (hash: ${header.lineHash}): ${body}")
                 // Use the lineHash header for the idempotent check with the configured repository
                 .idempotentConsumer(header("lineHash")).idempotentRepository("lineIdempotentRepository")
                     // If the line (based on its hash) is new, it passes through
-                    .log(LoggingLevel.DEBUG, "Processing new line (hash: ${header.lineHash}): ${body}")
+                    .log(LoggingLevel.INFO, "Processing NEW line (hash: ${header.lineHash}): ${body}")
                     .to(kafkaEndpointUri)
                     .log(LoggingLevel.INFO, "Sent to Kafka (hash: ${header.lineHash}): ${body}")
+                .end() // End of idempotentConsumer
+                .log(LoggingLevel.DEBUG, "Line processed or skipped (duplicate)")
             .end(); // End of split
 
         LOG.info("Camel route configured successfully.");
