@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - log_pipeline_net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.2
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      # Exposes 9092 for internal Docker network communication
+      # Exposes 29092 for external communication if needed (e.g. from host machine directly)
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      # Listen on 9092 for internal Docker network
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true" # Allows Camel to auto-create 'log-topic'
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - log_pipeline_net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8088:8080" # Host port 8088 maps to container port 8080
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092 # Internal communication
+      # KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181 # Optional, but can be useful
+      DYNAMIC_CONFIG_ENABLED: "true" # Allows adding/modifying clusters via UI if needed
+    networks:
+      - log_pipeline_net
+
+  file-logger:
+    build:
+      context: ./file-logger
+    container_name: file-logger
+    volumes:
+      - shared_logs_volume:/data/logs # Mount shared volume
+    networks:
+      - log_pipeline_net
+    # No ports needed as it only writes to a volume
+
+  camel-quarkus-app:
+    build:
+      context: ./camel-quarkus-app
+      # args: # Optional: specify Quarkus native builder image if needed
+        # QUARKUS_NATIVE_BUILDER_IMAGE: "quay.io/quarkus/ubi-quarkus-native-image:22.3-java17"
+    container_name: camel-quarkus-app
+    depends_on:
+      - kafka
+      - file-logger # Ensures logger starts and potentially creates the file first
+    volumes:
+      - shared_logs_volume:/data/logs:ro # Mount shared volume as read-only
+    environment:
+      QUARKUS_PROFILE: prod # Use prod profile
+      # Kafka brokers for the Camel Kafka component
+      # This matches the service name and internal port of Kafka
+      CAMEL_QUARKUS_KAFKA_BROKERS: kafka:9092
+      # Define the input file path for the Camel route
+      LOG_FILE_PATH: /data/logs/app.log
+    ports:
+      - "8081:8080" # Quarkus app http port (if any, not used in this example but good to have)
+    networks:
+      - log_pipeline_net
+
+volumes:
+  shared_logs_volume: # Define the shared volume for logs
+  kafka_data: # Persistent storage for Kafka data
+
+networks:
+  log_pipeline_net:
+    driver: bridge
